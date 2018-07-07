@@ -1,0 +1,22 @@
+{
+  "presets": ["env", "stage-0"],
+  "plugins": [
+    "transform-runtime",
+    "transform-flow-strip-types",
+    ["transform-es2015-template-literals"],
+    ["babel-plugin-root-import", {
+      "rootPathSuffix": "src"
+    }],
+    ["module-alias", [
+      { "src": "./src/ApiService", "expose": "ApiService" }
+    ]]
+  ],
+  "generatorOpts": {
+    "quotes": "double"
+  },
+  "ignore": [
+    "*.json",
+    "*.xml",
+    "node_modules"
+  ]
+}
