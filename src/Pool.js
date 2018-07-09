@@ -1,87 +1,88 @@
 import util from 'util'
+import { isFunction } from 'lodash'
 import _Pool from 'mysql/lib/Pool'
-import _PoolConfig from 'mysql/lib/PoolConfig'
+import PoolConfig from 'mysql/lib/PoolConfig';
+import Query from './Query'
 
-import {
-    cacheSet,
-    cacheGet,
-    cacheClear,
-} from '../services/cache'
-
-export class Query{
-    _cacheKey = null;
-    _cacheEnabled = false;
-    _cacheClearEnabled = false;
-
-    constructor(method){
-        this._method = method;
-    }
-
-
-    get cacheKey(){
-        return this._cacheKey;
-    }
-    get cacheEnabled(){
-        return this._cacheEnabled;
-    }
-    get cacheClearEnabled(){
-        return this._cacheClearEnabled;
-    }
-
-
-    cache(cacheKey = 'default'){
-        this._cacheKey = cacheKey;
-        this._cacheEnabled = true;
-        return this;
-    }
-    clearCache(cacheKey){
-        this._cacheKey = cacheKey;
-        this._cacheClearEnabled = true;
-        return this;
-    }
-    async exec(params){
-
-        // is caching enable?
-        if(this._cacheEnabled){
-            console.log('Cache Enabled:', this._cacheKey);
-
-            // if there's anything in the cache use it
-            const cachedData = cacheGet(this._cacheKey);
-            if(cachedData){
-                console.log('Found Cache:', this._cacheKey);
-                return cachedData;
-            }
-
-            // otherwise set the cache
-            console.log('Set Cache:', this._cacheKey);
-            const result = await this._method(params);
-            cacheSet(this._cacheKey, result);
-            return result;
-        }
-
-        if(this._cacheClearEnabled){
-            console.log('Clear Cache:', this._cacheKey);
-            cacheClear(this._cacheKey);
-        }
-
-        return await this._method(params);
-    }
-
-}
+const cacheClientMethods = [
+    'get',
+    'set',
+    'clear',
+];
 
 _Pool.prototype.query = util.promisify(_Pool.prototype.query);
 
 export default class Pool extends _Pool{
-    constructor(config){
-        super(config);
+    constructor(config, cacheClient){
+        super({config: new PoolConfig(config)});
+
+        if(!cacheClient){
+            throw(new Error('Pool cacheClient is required'))
+        }
+        for(const methodKey of cacheClientMethods){
+            const method = cacheClient[methodKey];
+            if(!isFunction(method)){
+                throw(new TypeError(`Pool cacheClient must have the following functions: ["${cacheClientMethods.join('", "')}"]`))
+            }
+        }
+        this.cache = cacheClient;
     }
-    q(string, inserts = null){
-        return new Query((params = null) => {
-            return this.query(string, params || inserts)
-        });
+    Q(string){
+        return new Query(this, string);
+    }
+    transaction(cb){
+        return new Promise((resolve, reject) => {
+            this.getConnection((connError, connection) => {
+                if(connError){
+                    reject(connError);
+                    return;
+                }
+
+                const query = makeQueryPromise(connection);
+
+                connection.beginTransaction(async (e) => {
+                    if (e) {
+                        connection.release();
+                        reject(e);
+                        return;
+                    }
+
+                    let results;
+                    try {
+                        results = await cb(query)
+                    } catch(e) {
+                        connection.rollback(() => {
+                            connection.release();
+                            reject(e);
+                        });
+                        return;
+                    }
+
+                    connection.commit(function (e) {
+                        if (e) {
+                            connection.rollback(function () {
+                                connection.release();
+                                reject(e);
+                            });
+                            return;
+                        }
+                        connection.release();
+                        resolve(results);
+                    });
+                })
+            })
+        })
     }
 }
+module.exports = Pool;
 
-export function createPool(config){
-    return new Pool({config: new _PoolConfig(config)});
+function makeQueryPromise(connection){
+    return function(queryString, inserts){
+        return new Promise((resolve, reject) =>{
+            connection.query( queryString, inserts, (error, data) =>{
+                if(error) return reject(error);
+                resolve(data)
+            });
+        })
+    }
 }
